@@ -12,19 +12,20 @@ namespace NesperTester
         public class NumberEvent
         {
             public int Id { get; set; }
-            public int Value { get; set; }
+            public int Valuea { get; set; }
         }
 
-        public class FaultEvent
+        public class InterEvent
         {
             public int Id { get; set; }
-            public int Value { get; set; }
+            public int RelatedFaultId { get; set; }
+            public int Valueb { get; set; }
         }
 
         static EPServiceProvider engine;
 
-        const int NFaults = 20;
-        const int NParamPerFault = 5;
+        const int NFaults = 1;
+        const int NParamPerFault = 2;
 
         static Dictionary<int, int> _faultStates = new Dictionary<int, int>();
         const int aggregatorFaultId = 1000;
@@ -33,10 +34,10 @@ namespace NesperTester
         {
             engine = EPServiceProviderManager.GetDefaultProvider();
 
-            //engine.EPAdministrator.Configuration.AddEventType("NumberEvent", typeof(NumberEvent));
-            engine.EPAdministrator.Configuration.AddEventType("FaultEvent", typeof(FaultEvent));
+            engine.EPAdministrator.Configuration.AddEventType("NumberEvent", typeof(NumberEvent));
+            engine.EPAdministrator.Configuration.AddEventType("InterEvent", typeof(InterEvent));
 
-            //CreateSimpleFaults();
+            CreateSimpleFaults();
             CreateAggregatorFault();
 
             for (int i = 1; i <= NFaults; i++)
@@ -46,7 +47,7 @@ namespace NesperTester
 
             _faultStates.Add(aggregatorFaultId, 0);
 
-            //Task.Factory.StartNew(() => SimulateNumberEvents(), TaskCreationOptions.LongRunning);
+            Task.Factory.StartNew(() => SimulateNumberEvents(), TaskCreationOptions.LongRunning);
             Task.Factory.StartNew(() => EngineFeedbacker(), TaskCreationOptions.LongRunning);
 
             System.Threading.Thread.Sleep(int.MaxValue);
@@ -54,7 +55,7 @@ namespace NesperTester
 
         static void CreateSimpleFaults()
         {
-            const int windowLength = 4;
+            const int windowLength = 2;
 
             for (int faultId = 1; faultId <= NFaults; faultId++)
             {
@@ -62,63 +63,49 @@ namespace NesperTester
 
                 for (int j = 0; j < NParamPerFault; j++)
                 {
-                    sb.AppendFormat("(AVG(NumberEvent{0}{1}.Value) = 1) OR ", faultId, j);
+                    var epl = string.Format(
+                        "INSERT INTO InterEvent " +
+                        "SELECT {0} as RelatedFaultId, {1} as Id, MIN(Valuea) AS Valueb " +
+                    "FROM NumberEvent(Id = {0}{1}).win:time({2} sec)", faultId, j, windowLength);
+                    //"FROM NumberEvent(Id = {0}{1}).std:lastevent()", faultId, j, windowLength);
+
+                    var statement = engine.EPAdministrator.CreateEPL(epl);
+                    statement.Start();
                 }
 
-                var rule = sb.ToString();
-                rule = rule.Remove(rule.Length - 4, 4);
-
-                sb.Clear();
-
-                for (int j = 0; j < NParamPerFault; j++)
                 {
-                    sb.AppendFormat("NumberEvent(Id = {0}{1}).win:time({2} sec) AS NumberEvent{0}{1}, ",
-                        faultId, j, windowLength);
+                    var epl = string.Format(
+                        "SELECT {0} AS Id, SUM(Valueb) > 0 AS Boolean " +
+                    "FROM InterEvent(RelatedFaultId={0}).std:unique(Id) output every 1 sec", faultId);
+                    //"FROM InterEvent(RelatedFaultId={0}).win:time(1 sec)", faultId);
+
+                    var statementName = string.Format("statement{0}", faultId);
+                    var statement = engine.EPAdministrator.CreateEPL(epl, statementName, faultId);
+                    statement.Start();
+                    statement.Events += Statement_Events;
+
+                    epl = string.Format(
+                        "INSERT INTO InterEvent " +
+                        "SELECT {0} as RelatedFaultId, {1} AS Id, SUM(Valueb) AS Valueb " +
+                        //"FROM InterEvent(RelatedFaultId={1}).std:unique(Id)", aggregatorFaultId, faultId);
+                        "FROM InterEvent(RelatedFaultId={1}).win:time(1 sec)", aggregatorFaultId, faultId);
+                    statement = engine.EPAdministrator.CreateEPL(epl);
+                    statement.Start();
                 }
-
-                var selectSources = sb.ToString();
-                selectSources = selectSources.Remove(selectSources.Length - 2, 2);
-
-                var eplStr = string.Format("SELECT {0} as Id, ({1}) AS BooleanValue FROM {2}", faultId, rule, selectSources);
-                var statementName = string.Format("statement{0}", faultId);
-
-                var statement = engine.EPAdministrator.CreateEPL(eplStr, statementName, faultId);
-                statement.Start();
-                statement.Events += Statement_Events;
             }
         }
 
 
         static void CreateAggregatorFault()
         {
-            const int windowLength = 4;
+            var epl = string.Format("SELECT {0} AS Id, SUM(Valueb) > 0 AS Boolean" +
+            //" FROM InterEvent(RelatedFaultId={0}).std:unique(Id)", aggregatorFaultId);
+            " FROM InterEvent(RelatedFaultId={0}).win:time(1 sec)", aggregatorFaultId);
 
-            StringBuilder sb = new StringBuilder();
-
-            for (int i = 1; i <= NFaults; i++)
-            {
-                sb.AppendFormat("(MIN(FaultEvent{0}.Value) = 1) OR ", i);
-            }
-
-            var rule = sb.ToString();
-            rule = rule.Remove(rule.Length - 4, 4);
-            sb.Clear();
-
-            for (int faultId = 1; faultId <= NFaults; faultId++)
-            {
-                sb.AppendFormat("FaultEvent(Id = {0}).win:time({1} sec) AS FaultEvent{0}, ", faultId, windowLength);
-                //sb.AppendFormat("FaultEvent(Id = {0}).std:lastevent() AS FaultEvent{0}, ", faultId, windowLength);
-            }
-            var selectSources = sb.ToString();
-            selectSources = selectSources.Remove(selectSources.Length - 2, 2);
-
-            var eplStr = string.Format("SELECT {0} as Id, {1} AS BooleanValue FROM {2}", aggregatorFaultId, rule, selectSources);
-
-            var statementName = string.Format("statement{0}", aggregatorFaultId);
-
-            var statement = engine.EPAdministrator.CreateEPL(eplStr, statementName, aggregatorFaultId);
-            statement.Start();
-            statement.Events += Statement_Events;
+            //var statementName = string.Format("statement{0}", aggregatorFaultId);
+            //var statement = engine.EPAdministrator.CreateEPL(epl, statementName, aggregatorFaultId);
+            //statement.Start();
+            //statement.Events += Statement_Events;
         }
 
 
@@ -128,6 +115,8 @@ namespace NesperTester
 
             while (true)
             {
+                counter++;
+
                 for (int i = 1; i <= NFaults; i++)
                 {
                     for (int j = 0; j < NParamPerFault; j++)
@@ -139,25 +128,23 @@ namespace NesperTester
                         {
                             if (i == 1 && j == 0)
                             {
-                                evt.Value = 1;
+                                evt.Valuea = 1;
                             }
                             else
                             {
-                                evt.Value = 0;
+                                evt.Valuea = 0;
                             }
                         }
                         else
                         {
-                            evt.Value = 0;
+                            evt.Valuea = 0;
                         }
 
                         engine.EPRuntime.SendEvent(evt);
+
+                        System.Threading.Thread.Sleep(2500 / NFaults / NParamPerFault);
                     }
-
-                    System.Threading.Thread.Sleep(3000 / NFaults);
                 }
-
-                counter++;
             }
         }
 
@@ -181,7 +168,7 @@ namespace NesperTester
 
                 lock (_faultStates)
                 {
-                    if (_faultStates[faultId] != faultValue)
+                    //if (_faultStates[faultId] != faultValue)
                     {
                         _faultStates[faultId] = faultValue;
 
@@ -203,11 +190,15 @@ namespace NesperTester
 
                 foreach (var item in faultStates)
                 {
-                    engine.EPRuntime.SendEvent(new FaultEvent()
+                    if (item.Value != -1)
                     {
-                        Id = item.Key,
-                        Value = item.Value,
-                    });
+                        //engine.EPRuntime.SendEvent(new InterEvent()
+                        //{
+                        //    RelatedFaultId = aggregatorFaultId,
+                        //    Id = item.Key,
+                        //    Valueb = item.Value > 0,
+                        //});
+                    }
 
                     System.Threading.Thread.Sleep(1000 / NFaults);
                 }
@@ -215,3 +206,5 @@ namespace NesperTester
         }
     }
 }
+
+
